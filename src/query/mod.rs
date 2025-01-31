@@ -19,11 +19,12 @@
 mod filter_optimizer;
 mod listing_table_builder;
 pub mod stream_schema_provider;
+mod rolling_mean;
 
 use chrono::NaiveDateTime;
 use chrono::{DateTime, Duration, Utc};
 use datafusion::arrow::record_batch::RecordBatch;
-
+use datafusion::logical_expr::WindowUDF;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion::error::DataFusionError;
 use datafusion::execution::disk_manager::DiskManagerConfig;
@@ -131,7 +132,12 @@ impl Query {
             )
             .unwrap();
 
-        SessionContext::new_with_state(state)
+        let ctx = SessionContext::new_with_state(state);
+        
+        // Register UDFs
+        Self::register_udfs(&ctx);
+        
+        ctx
     }
 
     pub async fn execute(
@@ -249,6 +255,11 @@ impl Query {
             // Unsupported expression type
             _ => None,
         }
+    }
+
+    pub fn register_udfs(ctx: &SessionContext) {
+        let rolling_mean = WindowUDF::from(RollingMeanUdf::new());
+        ctx.register_udwf(rolling_mean);
     }
 }
 
@@ -712,3 +723,5 @@ mod tests {
         assert_eq!(val, out);
     }
 }
+
+pub use rolling_mean::RollingMeanUdf;
