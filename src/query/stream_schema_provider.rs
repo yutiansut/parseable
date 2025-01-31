@@ -73,22 +73,33 @@ use crate::{
 use super::listing_table_builder::ListingTableBuilder;
 use crate::catalog::Snapshot as CatalogSnapshot;
 
-// schema provider for stream based on global data
+/// 全局模式提供者，作为DataFusion的SchemaProvider实现
+/// 负责管理所有流（表）的元数据信息
 #[derive(Debug)]
 pub struct GlobalSchemaProvider {
+    /// 存储后端抽象（支持S3/GCS/本地等）
+    /// 类型：实现了ObjectStorage trait的动态分发对象
+    /// 示例：Arc<AmazonS3Storage> 或 Arc<LocalDiskStorage>
     pub storage: Arc<dyn ObjectStorage>,
 }
 
 #[async_trait::async_trait]
 impl SchemaProvider for GlobalSchemaProvider {
+    /// 实现DataFusion的SchemaProvider trait
     fn as_any(&self) -> &dyn Any {
         self
     }
 
+    /// 获取所有流（表）名称列表
+    /// 返回：Vec<String> 流名称列表，例如 ["nginx_logs", "app_metrics"]
     fn table_names(&self) -> Vec<String> {
         STREAM_INFO.list_streams()
     }
 
+    /// 获取指定表（流）的TableProvider
+    /// 参数：
+    /// - name: &str 流名称，例如 "nginx_logs"
+    /// 返回：DataFusionResult<Option<Arc<dyn TableProvider>>>
     async fn table(&self, name: &str) -> DataFusionResult<Option<Arc<dyn TableProvider>>> {
         if self.table_exist(name) {
             Ok(Some(Arc::new(StandardTableProvider {
@@ -101,21 +112,43 @@ impl SchemaProvider for GlobalSchemaProvider {
         }
     }
 
+    /// 检查表（流）是否存在
+    /// 参数：
+    /// - name: &str 流名称
+    /// 返回：bool 存在返回true
     fn table_exist(&self, name: &str) -> bool {
         STREAM_INFO.stream_exists(name)
     }
 }
 
+/// 标准表提供者实现，表示单个流的数据源
 #[derive(Debug)]
 struct StandardTableProvider {
+    /// Arrow格式的表模式（Schema）
+    /// 示例：包含 timestamp(Datetime), level(Utf8), message(Utf8) 等字段
     schema: SchemaRef,
-    // prefix under which to find snapshot
+    
+    /// 流名称标识符
+    /// 示例："nginx_access_logs"
     stream: String,
-    // url to find right instance of object store
+    
+    /// 存储后端的访问URL
+    /// 示例：Url::parse("s3://my-bucket/").unwrap()
     url: Url,
 }
 
 impl StandardTableProvider {
+    /// 创建Parquet文件的物理执行计划（核心方法）
+    /// 参数：
+    /// - execution_plans: &mut Vec<Arc<dyn ExecutionPlan>> 执行计划收集器
+    /// - object_store_url: ObjectStoreUrl 对象存储URL
+    /// - partitions: Vec<Vec<PartitionedFile>> 分区文件列表
+    /// - statistics: Statistics 统计信息
+    /// - projection: Option<&Vec<usize>> 列投影（可选）
+    /// - filters: &[Expr] 过滤条件表达式
+    /// - limit: Option<usize> 结果行数限制
+    /// - state: &dyn Session 查询会话状态
+    /// - time_partition: Option<String> 时间分区字段（可选）
     #[allow(clippy::too_many_arguments)]
     async fn create_parquet_physical_plan(
         &self,
@@ -172,6 +205,12 @@ impl StandardTableProvider {
         Ok(())
     }
 
+    /// 处理热层执行计划生成
+    /// 参数：
+    /// - execution_plans: &mut Vec<Arc<dyn ExecutionPlan>> 执行计划收集器
+    /// - hot_tier_manager: &HotTierManager 热层管理器实例
+    /// - manifest_files: &mut Vec<File> 清单文件列表（输入输出参数）
+    /// - 其他参数同create_parquet_physical_plan
     #[allow(clippy::too_many_arguments)]
     async fn get_hottier_exectuion_plan(
         &self,
@@ -272,6 +311,10 @@ impl StandardTableProvider {
         Ok(exec)
     }
 
+    /// 将清单文件转换为分区文件结构
+    /// 参数：
+    /// - manifest_files: Vec<catalog::manifest::File> 输入清单文件列表
+    /// 返回：(分区文件列表, 统计信息)
     fn partitioned_files(
         &self,
         manifest_files: Vec<catalog::manifest::File>,

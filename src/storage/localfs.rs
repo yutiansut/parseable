@@ -80,24 +80,42 @@ impl ObjectStorageProvider for FSConfig {
     }
 }
 
+/// 本地文件系统存储实现
+/// 实现 ObjectStorage trait 用于对接 Parseable 存储抽象层
 #[derive(Debug)]
 pub struct LocalFS {
-    // absolute path of the data directory
+    /// 数据存储根目录的绝对路径
+    /// 示例：PathBuf::from("/var/lib/parseable/data")
     root: PathBuf,
 }
 
 impl LocalFS {
+    /// 创建新的 LocalFS 实例
+    /// 参数：
+    /// - root: 数据存储根目录路径
+    /// 示例：LocalFS::new(PathBuf::from("/data"))
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
+    /// 将相对路径转换为绝对路径
+    /// 参数：
+    /// - path: 相对路径（基于存储根目录）
+    /// 返回：组合后的绝对路径
+    /// 示例：path_in_root("logs/nginx") → /data/logs/nginx
     pub fn path_in_root(&self, path: &RelativePath) -> PathBuf {
         path.to_path(&self.root)
     }
 }
 
+/// 实现 ObjectStorage trait 的核心方法
 #[async_trait]
 impl ObjectStorage for LocalFS {
+    /// 获取指定路径的文件内容
+    /// 参数：
+    /// - path: 相对路径（如 "logs/2023/01/01/0001.parquet"）
+    /// 返回：Bytes 文件内容 或 错误
+    /// 指标：记录请求响应时间和状态码（404/500等）
     async fn get_object(&self, path: &RelativePath) -> Result<Bytes, ObjectStorageError> {
         let time = Instant::now();
         let file_path = self.path_in_root(path);
@@ -119,6 +137,9 @@ impl ObjectStorage for LocalFS {
         res
     }
 
+    /// 获取所有包含 "ingestor" 的元数据文件路径
+    /// 返回：相对路径列表（如 ["ingestor_meta_v1.json"]）
+    /// 用途：用于系统恢复和元数据管理
     async fn get_ingestor_meta_file_paths(
         &self,
     ) -> Result<Vec<RelativePathBuf>, ObjectStorageError> {
@@ -152,6 +173,13 @@ impl ObjectStorage for LocalFS {
         Ok(path_arr)
     }
 
+    /// 获取指定流的所有相关文件路径
+    /// 参数：
+    /// - stream_name: 日志流名称（如 "nginx"）
+    /// 返回：包含以下文件的路径列表：
+    ///   - 数据文件（含 "ingestor" 标记）
+    ///   - 流元数据文件（stream.json）
+    ///   - 模式文件（schema.json）
     async fn get_stream_file_paths(
         &self,
         stream_name: &str,
@@ -196,7 +224,12 @@ impl ObjectStorage for LocalFS {
         Ok(path_arr)
     }
 
-    /// currently it is not using the starts_with_pattern
+    /// 根据过滤条件获取多个对象数据
+    /// 参数：
+    /// - base_path: 基础路径（可选，用于限定搜索范围）
+    /// - filter_func: 过滤函数（判断文件名是否符合条件）
+    /// 返回：符合条件文件的内容列表
+    /// 注意：用于批量获取ingestor元数据文件
     async fn get_objects(
         &self,
         base_path: Option<&RelativePath>,
@@ -242,6 +275,14 @@ impl ObjectStorage for LocalFS {
         Ok(res)
     }
 
+    /// 写入对象到指定路径
+    /// 参数：
+    /// - path: 目标相对路径
+    /// - resource: 要写入的字节数据
+    /// 功能：
+    /// 1. 自动创建父目录
+    /// 2. 原子写入文件
+    /// 3. 记录性能指标
     async fn put_object(
         &self,
         path: &RelativePath,
@@ -264,29 +305,43 @@ impl ObjectStorage for LocalFS {
         res.map_err(Into::into)
     }
 
+    /// 删除指定前缀（目录）下的所有内容
+    /// 参数：
+    /// - path: 要删除的目录相对路径
+    /// 注意：递归删除目录及其所有子内容
     async fn delete_prefix(&self, path: &RelativePath) -> Result<(), ObjectStorageError> {
         let path = self.path_in_root(path);
         tokio::fs::remove_dir_all(path).await?;
         Ok(())
     }
 
+    /// 删除单个文件对象
+    /// 参数：
+    /// - path: 要删除的文件相对路径
     async fn delete_object(&self, path: &RelativePath) -> Result<(), ObjectStorageError> {
         let path = self.path_in_root(path);
         tokio::fs::remove_file(path).await?;
         Ok(())
     }
 
+    /// 存储系统健康检查
+    /// 功能：
+    /// 1. 确保根目录存在
+    /// 2. 验证目录可写性
     async fn check(&self) -> Result<(), ObjectStorageError> {
         fs::create_dir_all(&self.root)
             .await
             .map_err(|e| ObjectStorageError::UnhandledError(e.into()))
     }
 
+    /// 删除指定日志流的所有数据
+    /// 参数：
+    /// - stream_name: 要删除的流名称
+    /// 注意：实际删除对应的流目录
     async fn delete_stream(&self, stream_name: &str) -> Result<(), ObjectStorageError> {
         let path = self.root.join(stream_name);
         Ok(fs::remove_dir_all(path).await?)
     }
-
     async fn try_delete_ingestor_meta(
         &self,
         ingestor_filename: String,
@@ -294,7 +349,11 @@ impl ObjectStorage for LocalFS {
         let path = self.root.join(ingestor_filename);
         Ok(fs::remove_file(path).await?)
     }
-
+    /// 列出所有有效日志流
+    /// 过滤目录：
+    /// - "lost+found"：系统保留目录
+    /// - 其他Parseable系统目录（如用户、告警目录）
+    /// 返回：LogStream 的集合
     async fn list_streams(&self) -> Result<HashSet<LogStream>, ObjectStorageError> {
         let ignore_dir = &[
             "lost+found",
@@ -316,6 +375,8 @@ impl ObjectStorage for LocalFS {
         Ok(logstreams)
     }
 
+    /// 列出旧版日志流（兼容性处理）
+    /// 过滤目录与 list_streams 略有不同
     async fn list_old_streams(&self) -> Result<HashSet<LogStream>, ObjectStorageError> {
         let ignore_dir = &[
             "lost+found",
@@ -336,6 +397,8 @@ impl ObjectStorage for LocalFS {
         Ok(logstreams)
     }
 
+    /// 列出根目录下的所有一级子目录
+    /// 返回：目录名称列表（字符串形式）
     async fn list_dirs(&self) -> Result<Vec<String>, ObjectStorageError> {
         let dirs = ReadDirStream::new(fs::read_dir(&self.root).await?)
             .try_collect::<Vec<DirEntry>>()
@@ -353,6 +416,9 @@ impl ObjectStorage for LocalFS {
         Ok(dirs)
     }
 
+    /// 获取所有用户的仪表板配置
+    /// 返回：HashMap<相对路径, 文件内容列表>
+    /// 路径结构：users/{username}/dashboards/{dashboard_name}.json
     async fn get_all_dashboards(
         &self,
     ) -> Result<HashMap<RelativePathBuf, Vec<Bytes>>, ObjectStorageError> {
@@ -383,6 +449,9 @@ impl ObjectStorage for LocalFS {
         Ok(dashboards)
     }
 
+    /// 获取所有保存的过滤器配置
+    /// 返回：HashMap<相对路径, 文件内容列表>
+    /// 路径结构：users/{username}/filters/{stream_name}/{filter_name}.json
     async fn get_all_saved_filters(
         &self,
     ) -> Result<HashMap<RelativePathBuf, Vec<Bytes>>, ObjectStorageError> {

@@ -62,34 +62,77 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// 对象存储核心抽象层
+/// 定义统一的对象存储接口和公共实现
+
+/// 对象存储提供者 Trait
+/// 职责：创建具体存储实现并集成到系统
 pub trait ObjectStorageProvider: StorageMetrics + std::fmt::Debug + Send + Sync {
+    /// 获取 DataFusion 运行时环境配置
+    /// 返回：RuntimeEnvBuilder 用于构建查询执行环境
     fn get_datafusion_runtime(&self) -> RuntimeEnvBuilder;
+
+    /// 构造存储客户端实例
+    /// 返回：Arc<dyn ObjectStorage> 存储客户端智能指针
     fn construct_client(&self) -> Arc<dyn ObjectStorage>;
     fn get_object_store(&self) -> Arc<dyn ObjectStorage> {
         static STORE: OnceCell<Arc<dyn ObjectStorage>> = OnceCell::new();
 
         STORE.get_or_init(|| self.construct_client()).clone()
     }
+
+    /// 获取存储端点 URL
+    /// 返回：字符串形式的存储地址（如 "s3://bucket" 或 "/data"）
     fn get_endpoint(&self) -> String;
+
+    /// 注册存储相关监控指标
+    /// 参数：
+    /// - handler: Prometheus 指标处理器
     fn register_store_metrics(&self, handler: &PrometheusMetrics);
 }
 
+/// 统一对象存储操作接口
 #[async_trait]
 pub trait ObjectStorage: Debug + Send + Sync + 'static {
+    /// 获取指定路径对象内容
+    /// 参数：
+    /// - path: 相对路径（如 "logs/2023/01/01/data.parquet"）
+    /// 返回：Bytes 对象内容 或 错误
     async fn get_object(&self, path: &RelativePath) -> Result<Bytes, ObjectStorageError>;
-    // TODO: make the filter function optional as we may want to get all objects
+
+    /// 批量获取对象（带过滤条件）
+    /// 参数：
+    /// - base_path: 基础路径（可选）
+    /// - filter_fun: 过滤函数（文件名 → bool）
+    /// 返回：符合条件对象的字节内容列表
     async fn get_objects(
         &self,
         base_path: Option<&RelativePath>,
         filter_fun: Box<dyn Fn(String) -> bool + Send>,
     ) -> Result<Vec<Bytes>, ObjectStorageError>;
+
+    /// 写入对象到指定路径
+    /// 参数：
+    /// - path: 目标相对路径
+    /// - resource: 要写入的字节数据
     async fn put_object(
         &self,
         path: &RelativePath,
         resource: Bytes,
     ) -> Result<(), ObjectStorageError>;
+
+    /// 删除指定前缀的所有对象
+    /// 参数：
+    /// - path: 要删除的目录前缀
     async fn delete_prefix(&self, path: &RelativePath) -> Result<(), ObjectStorageError>;
+
+    /// 存储系统健康检查
+    /// 验证存储可用性和权限
     async fn check(&self) -> Result<(), ObjectStorageError>;
+
+    /// 删除指定日志流的所有数据
+    /// 参数：
+    /// - stream_name: 要删除的流名称（如 "nginx"）
     async fn delete_stream(&self, stream_name: &str) -> Result<(), ObjectStorageError>;
     async fn list_streams(&self) -> Result<HashSet<LogStream>, ObjectStorageError>;
     async fn list_old_streams(&self) -> Result<HashSet<LogStream>, ObjectStorageError>;
@@ -123,12 +166,15 @@ pub trait ObjectStorage: Debug + Send + Sync + 'static {
     ) -> Result<(), ObjectStorageError>;
     /// Returns the amount of time taken by the `ObjectStore` to perform a get
     /// call.
+
+    /// 获取存储延迟指标（默认实现）
+    /// 实现：通过 HEAD 请求测量基础路径访问延迟
     async fn get_latency(&self) -> Duration {
         // It's Ok to `unwrap` here. The hardcoded value will always Result in
         // an `Ok`.
-        let path = parseable_json_path();
+        let path = parseable_json_path(); // 检测系统元数据文件访问延迟
         let start = Instant::now();
-        let _ = self.get_object(&path).await;
+        let _ = self.get_object(&path).await; // 忽略结果，仅测量延迟
         start.elapsed()
     }
 
@@ -147,6 +193,17 @@ pub trait ObjectStorage: Debug + Send + Sync + 'static {
         Ok(())
     }
 
+    /// 创建流的核心实现
+    /// 参数：
+    /// - stream_name: 流名称
+    /// - time_partition: 时间分区粒度（如 "hourly"）
+    /// - time_partition_limit: 最大保留时间（单位与分区粒度一致）
+    /// - custom_partition: 自定义分区字段（如 "region"）
+    /// - static_schema_flag: 是否禁止自动模式演进
+    /// - schema: 初始 Arrow 模式
+    /// - stream_type: 流数据类型（日志/指标）
+    /// - log_source: 日志来源（用于元数据标记）
+    /// 返回：创建的流名称
     #[allow(clippy::too_many_arguments)]
     async fn create_stream(
         &self,
