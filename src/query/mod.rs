@@ -20,6 +20,7 @@ mod filter_optimizer;
 mod listing_table_builder;
 pub mod stream_schema_provider;
 mod rolling_mean;
+pub use rolling_mean::RollingMeanUdf;
 
 use chrono::NaiveDateTime;
 use chrono::{DateTime, Duration, Utc};
@@ -57,9 +58,18 @@ use crate::metadata::STREAM_INFO;
 use crate::option::{Mode, CONFIG};
 use crate::storage::{ObjectStorageProvider, ObjectStoreFormat, STREAM_ROOT_DIRECTORY};
 use crate::utils::time::TimeRange;
-pub static QUERY_SESSION: Lazy<SessionContext> =
-    Lazy::new(|| Query::create_session_context(CONFIG.storage()));
-
+// pub static QUERY_SESSION: Lazy<SessionContext> =
+//     Lazy::new(|| Query::create_session_context(CONFIG.storage()));
+pub static QUERY_SESSION: Lazy<SessionContext> = Lazy::new(|| {
+    //let config = SessionConfig::new().with_target_partitions(4);
+    let ctx = Query::create_session_context(CONFIG.storage());
+    
+    // 注册滚动平均函数
+    let rolling_mean = WindowUDF::from(RollingMeanUdf::new());
+    ctx.register_udwf(rolling_mean);
+    
+    ctx
+});
 // A query request by client
 #[derive(Debug)]
 pub struct Query {
@@ -724,4 +734,3 @@ mod tests {
     }
 }
 
-pub use rolling_mean::RollingMeanUdf;
